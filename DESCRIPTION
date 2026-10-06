@@ -1,0 +1,68 @@
+Package: binnr
+Title: Biologically Informed Neural Networks as Graph Neural Networks
+Version: 0.1.0
+Authors@R: c(
+    person("David", "Selby", , "david_antony.selby@dfki.de", role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0001-8026-5663",
+                       affiliation = "Deutsches Forschungszentrum f\u00fcr K\u00fcnstliche Intelligenz (DFKI)")),
+    person("Daria", "Pavliuk", , "daria.pavliuk@dfki.de", role = "aut",
+           comment = c(affiliation = "DFKI")),
+    person("Gerrit", "Grossmann", , "gerrit.grossmann@dfki.de", role = "aut",
+           comment = c(ORCID = "0000-0002-4933-447X", affiliation = "DFKI")),
+    person("Sebastian", "Vollmer", , "sebastian.vollmer@dfki.de", role = "aut",
+           comment = c(ORCID = "0000-0003-2831-1401", affiliation = "DFKI"))
+  )
+Description: Fits biologically informed neural networks (BINNs) whose
+    architecture follows a pathway knowledge graph such as Reactome. Models are
+    implemented as message-passing graph neural networks on a directed acyclic
+    graph using 'torch', so that classic masked feedforward BINNs are a special
+    case, and constraints such as scalar pathway nodes, fixed depth, dummy
+    padding nodes and edge-specific weights can be relaxed. Supports
+    multi-omics inputs, clinical covariates and classification, regression and
+    Cox survival outcomes.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Depends: R (>= 4.1)
+LazyData: true
+Imports:
+    cli,
+    generics,
+    hardhat,
+    igraph (>= 2.2.0),
+    methods,
+    rlang (>= 1.1.0),
+    stats,
+    tibble,
+    tools,
+    torch (>= 0.13.0),
+    utils,
+    withr
+Suggests:
+    TCGAutils,
+    curatedTCGAData,
+    yardstick,
+    tidygraph,
+    BiocStyle,
+    dplyr,
+    ggplot2,
+    glmnet,
+    knitr,
+    MultiAssayExperiment,
+    qvcalc,
+    ranger,
+    rmarkdown,
+    S4Vectors,
+    SummarizedExperiment,
+    survival,
+    tidyr,
+    testthat (>= 3.0.0),
+    xgboost
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+URL: https://github.com/datasciapps/binnr
+BugReports: https://github.com/datasciapps/binnr/issues
+biocViews: Software, NeuralNetwork, Pathways, Reactome, Survival,
+    Classification, Regression, GeneExpression, CopyNumberVariation,
+    Proteomics
+Config/roxygen2/version: 8.1.0

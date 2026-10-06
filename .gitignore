@@ -1,0 +1,12 @@
+.Rproj.user
+.Rhistory
+.RData
+inst/doc
+*.Rcheck/
+binnr_*.tar.gz
+talk/slides_cache/
+talk/slides_files/
+cluster/logs/
+inst/extdata/parts/
+pkgdown/
+Rplots.pdf

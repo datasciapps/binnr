@@ -1,0 +1,290 @@
+---
+title: "Benchmark: binnr versus standard R learners"
+author:
+  - name: David Selby
+    affiliation: Deutsches Forschungszentrum für Künstliche Intelligenz (DFKI)
+    email: david_antony.selby@dfki.de
+  - name: Daria Pavliuk
+    affiliation: DFKI
+  - name: Gerrit Grossmann
+    affiliation: DFKI
+  - name: Sebastian Vollmer
+    affiliation: DFKI
+date: "`r Sys.Date()`"
+output:
+  BiocStyle::html_document:
+    toc_float: true
+vignette: >
+  %\VignetteIndexEntry{Benchmark: binnr versus standard R learners}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 7.5, fig.height = 4,
+                      dpi = 96, echo = FALSE)
+```
+
+This vignette summarises a small cross-validated comparison between binnr
+models and learners commonly used for omics prediction in R. The results are
+**precomputed** by `inst/scripts/benchmark.R` (about three hours on a 2-core
+laptop), because refitting hundreds of models is too slow for a vignette. Run it
+yourself with
+
+```sh
+Rscript inst/scripts/benchmark.R all 5 5
+```
+
+# Setup
+
+* **Data**: the TCGA BRCA and PRAD example cohorts from `tcga_cohort()`
+  (1,000 Reactome genes per cohort).
+* **Tasks**:
+  - *PAM50 subtype* (BRCA): 4-class classification from RNA, copy number and
+    mutation (n = 484), scored by accuracy and balanced accuracy;
+  - *Overall survival* (BRCA): Cox model from omics plus age and stage (n = 928,
+    about 130 deaths), scored by Harrell's C-index;
+  - *Gleason grade* (PRAD): high (8–10) versus low (6–7) grade from RNA and copy
+    number (n = 491, 41% high), the task used to showcase P-NET, scored by AUROC.
+* **Evaluation**: 5-fold cross-validation (stratified by class or by event
+  status), repeated 5 times, with identical folds for every method (25 splits).
+* **Tuning**: every learner chooses its hyperparameters *inside* the training
+  fold, with a matched budget. binnr models select the graph depth (5 levels,
+  as P-NET truncates Reactome, or the full hierarchy), and the weight decay
+  (BINN) or state dimension (GNN), by the early-stopping validation loss via
+  `bn_tune()`; `cv.glmnet` selects its penalty and `xgb.cv` the number of
+  boosting rounds by inner 5-fold CV; ranger runs at its defaults. The graph
+  variants below reuse the configuration selected for the Reactome BINN.
+* **Uncertainty**: comparison intervals from *quasi-variances* (Firth & de
+  Menezes, 2004; `qvcalc`) of the method effects in a split-blocked linear
+  model `score ~ method + split`. Two methods differ at roughly the 5% level
+  when their intervals (mean ± 1.39 quasi-standard errors) do not overlap.
+  Because the 25 splits are not independent blocks (the same samples recur and
+  training sets overlap), the contrast covariance is inflated by the
+  Nadeau & Bengio (2003) factor $1 + J/(k-1)$ before computing the
+  quasi-variances; this roughly triples the interval width and is the
+  conservative choice.
+* **Methods**:
+  - `Lasso (glmnet)`: L1-penalised multinomial or Cox regression, with the
+    penalty chosen by inner 5-fold CV. In the survival task, age and stage are
+    unpenalised.
+  - `Random forest (ranger)`: 500 trees; a survival forest for the Cox task,
+    with risk scored as the summed cumulative hazard.
+  - `Boosting (xgboost)`: 300 rounds, learning rate 0.05 (0.03 for survival),
+    depth 3 (2), 30% column subsampling.
+  - `Cox, clinical only`: `survival::coxph(Surv ~ age + stage)`.
+  - `BINN (binnr)`: `bn_arch("binn")`, the classic BINN architecture
+    (scalar pathway nodes, one weight per edge, readout from the root pathways),
+    trained with binnr's topological schedule on the unpadded Reactome DAG.
+  - `BINN, stratified (padded)`: the same architecture on the padded graph
+    from `bn_pad()`, i.e. P-NET's stratified construction with copy nodes.
+  - `GNN (binnr)`: `bn_arch("gnn")`, with 4-dimensional pathway embeddings and
+    GCN-style shared weights.
+  - `BINN, rewired graph`: a BINN on a degree-preserving randomisation of the
+    Reactome graph (`bn_rewire("degree")`), with the same sparsity and degrees
+    but random gene–pathway assignments. A new null graph is drawn for every
+    split.
+  - `BINN, random graph`: a BINN on an Erdős–Rényi graph with the same number
+    of gene–pathway edges (`bn_rewire("bernoulli")`), redrawn for every split.
+  - `BINN, 50% of annotations removed`: a BINN on an *incomplete* knowledge
+    graph (`bn_drop_edges(prop = 0.5)`), redrawn for every split.
+
+  All binnr models use the default `bn_control()`: AdamW, early stopping
+  on a 20% validation split, and no tuning.
+
+```{r load}
+bench_file <- system.file("extdata", "benchmark.rds", package = "binnr")
+have <- nzchar(bench_file) && requireNamespace("ggplot2", quietly = TRUE)
+knitr::opts_chunk$set(eval = have)
+```
+
+```{r data, eval = have}
+bench <- readRDS(bench_file)
+info <- attr(bench, "info")
+order_methods <- c("Cox, clinical only", "Lasso (glmnet)", "Random forest (ranger)",
+                   "Boosting (xgboost)", "BINN (binnr)", "BINN, stratified (padded)",
+                   "GNN (binnr)", "BINN, rewired graph", "BINN, random graph",
+                   "BINN, 50% of annotations removed")
+bench$task <- factor(bench$task, levels = c("PAM50 subtype", "Overall survival", "Gleason grade"))
+bench$method <- factor(bench$method, levels = rev(intersect(order_methods, bench$method)))
+family_of <- function(m) ifelse(grepl("binnr|BINN|GNN", m), "binnr", "baseline")
+```
+
+# Results
+
+```{r helpers, eval = have}
+library(dplyr, warn.conflicts = FALSE)
+library(ggplot2)
+k <- info$folds
+# Corrected resampled t interval (Nadeau & Bengio, 2003), for paired differences
+corrected_t <- function(x, k) {
+  J <- length(x)
+  se <- sqrt((1 / J + 1 / (k - 1)) * stats::var(x))
+  q <- stats::qt(0.975, J - 1)
+  tibble(mean = mean(x), lower = mean(x) - q * se, upper = mean(x) + q * se,
+         p = 2 * stats::pt(-abs(mean(x) / se), J - 1))
+}
+# Quasi-variance comparison intervals (Firth & de Menezes, 2004) from the
+# split-blocked model, with the Nadeau-Bengio inflation of the covariance
+qv_summary <- function(d, k, inflate = TRUE) {
+  d <- d |> mutate(split = interaction(rep, fold, drop = TRUE), method = droplevels(method))
+  fit <- lm(value ~ method + split, data = d)
+  m <- nlevels(d$method); J <- nlevels(d$split)
+  idx <- grep("^method", names(coef(fit)))
+  Vfull <- matrix(0, m, m); Vfull[-1, -1] <- vcov(fit)[idx, idx]
+  if (inflate) Vfull <- Vfull * (1 + J / (k - 1))
+  qv <- qvcalc::qvcalc(Vfull, estimates = c(0, coef(fit)[idx]), labels = levels(d$method))$qvframe
+  tibble(method = factor(levels(d$method), levels(d$method)),
+         mean = as.numeric(tapply(d$value, d$method, mean)[levels(d$method)]),
+         qse = sqrt(qv$quasiVar)) |>
+    mutate(lower = mean - 1.39 * qse, upper = mean + 1.39 * qse)
+}
+metric_labels <- c(accuracy = "Accuracy", balanced_accuracy = "Balanced accuracy",
+                   c_index = "C-index", auroc = "AUROC")
+# Headline metric per task, for the figures
+headline <- bench[(bench$task == "PAM50 subtype" & bench$metric == "accuracy") |
+                  (bench$task == "Overall survival" & bench$metric == "c_index") |
+                  (bench$task == "Gleason grade" & bench$metric == "auroc"), ]
+```
+
+```{r table, eval = have}
+summ <- bench |>
+  group_by(task, metric) |>
+  group_modify(~ qv_summary(.x, k)) |>
+  ungroup() |>
+  left_join(bench |> distinct(task, method, rep, fold, seconds) |>
+              group_by(task, method) |> summarise(seconds = median(seconds), .groups = "drop"),
+            by = c("task", "method")) |>
+  arrange(task, metric, desc(mean))
+summ |>
+  mutate(`comparison interval` = sprintf("[%.3f, %.3f]", lower, upper),
+         metric = metric_labels[metric]) |>
+  select(task, metric, method, mean, QSE = qse, `comparison interval`, `median s` = seconds) |>
+  knitr::kable(digits = 3, caption = sprintf(
+    "Mean over %d x %d-fold cross-validation with quasi-standard errors and comparison intervals (mean +/- 1.39 QSE).",
+    info$repeats, info$folds))
+```
+
+```{r plot, eval = have, fig.height = 5.5}
+summ |>
+  semi_join(distinct(headline, task, metric), by = c("task", "metric")) |>
+  mutate(metric = metric_labels[metric]) |>
+  ggplot(aes(mean, method, colour = family_of(method))) +
+  geom_pointrange(aes(xmin = lower, xmax = upper)) +
+  facet_wrap(~ task + metric, scales = "free_x") +
+  scale_colour_manual(values = c(baseline = "#7A7A7A", binnr = "#3B6EA8")) +
+  labs(x = "Mean with quasi-variance comparison interval", y = NULL, colour = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Paired comparisons with the Reactome BINN
+
+Differences are computed within each split, which removes the variability
+shared by all methods (easy and hard folds), with corrected resampled *t*
+intervals (Nadeau & Bengio, 2003). Positive values mean the method beats the
+Reactome BINN.
+
+```{r paired, eval = have}
+ref <- "BINN (binnr)"
+diffs <- bench |>
+  filter(method != ref) |>
+  inner_join(bench |> filter(method == ref) |> select(task, metric, rep, fold, ref = value),
+             by = c("task", "metric", "rep", "fold")) |>
+  mutate(diff = value - ref)
+paired <- diffs |>
+  group_by(task, metric, method) |>
+  reframe(corrected_t(diff, k)) |>
+  arrange(task, metric, desc(mean))
+paired |>
+  mutate(`95% CI` = sprintf("[%+.3f, %+.3f]", lower, upper),
+         metric = metric_labels[metric]) |>
+  select(task, metric, method, difference = mean, `95% CI`, p) |>
+  knitr::kable(digits = 3, caption = "Difference from the Reactome BINN (corrected resampled t).")
+```
+
+```{r paired-plot, eval = have, fig.height = 5}
+paired |>
+  semi_join(distinct(headline, task, metric), by = c("task", "metric")) |>
+  mutate(metric = metric_labels[metric]) |>
+  ggplot(aes(mean, method, colour = family_of(method))) +
+  geom_vline(xintercept = 0, colour = "grey40") +
+  geom_pointrange(aes(xmin = lower, xmax = upper)) +
+  facet_wrap(~ task + metric, scales = "free_x") +
+  scale_colour_manual(values = c(baseline = "#7A7A7A", binnr = "#3B6EA8")) +
+  labs(x = "Difference from Reactome BINN (95% interval)", y = NULL, colour = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Which configurations were selected?
+
+```{r selected, eval = have && !is.null(attr(bench, "selected"))}
+attr(bench, "selected") |>
+  mutate(depth = ifelse(is.finite(max_level), "5 levels", "full")) |>
+  count(task, method, depth, hidden_dim, weight_decay) |>
+  arrange(task, method, desc(n)) |>
+  knitr::kable(caption = "Configurations chosen by validation loss, by task and split count.")
+```
+
+# Interpretation
+
+```{r numbers, eval = have}
+est <- function(tsk, met, mth, tab = summ) {
+  r <- tab[tab$task == tsk & tab$metric == met & tab$method == mth, ]
+  sprintf("%.3f [%.3f, %.3f]", r$mean, r$lower, r$upper)
+}
+dif <- function(tsk, met, mth) est(tsk, met, mth, paired)
+```
+
+* **No free lunch from pathways.** With matched within-fold tuning the Reactome BINN
+  reaches a PAM50 accuracy of `r est("PAM50 subtype", "accuracy", "BINN (binnr)")`,
+  a survival C-index of `r est("Overall survival", "c_index", "BINN (binnr)")`
+  and a Gleason AUROC of `r est("Gleason grade", "auroc", "BINN (binnr)")`.
+  The lasso differs from it by
+  `r dif("PAM50 subtype", "accuracy", "Lasso (glmnet)")` in accuracy,
+  `r dif("Overall survival", "c_index", "Lasso (glmnet)")` in C-index and
+  `r dif("Gleason grade", "auroc", "Lasso (glmnet)")` in AUROC (paired
+  differences with 95% intervals; positive favours the lasso).
+* **Stratified versus topological.** P-NET's padded construction differs from
+  the unpadded DAG by
+  `r dif("PAM50 subtype", "accuracy", "BINN, stratified (padded)")` (accuracy),
+  `r dif("Overall survival", "c_index", "BINN, stratified (padded)")` (C-index) and
+  `r dif("Gleason grade", "auroc", "BINN, stratified (padded)")` (AUROC). The
+  differences are small and not consistent in sign, so the thousands of copy
+  nodes buy no reliable accuracy. They are not free of consequences either: a
+  copy node with its own weight and bias is not a skip connection, so the
+  padded graph is a different (larger) model, which may explain the survival
+  result.
+* **Biology or sparsity?** A BINN on a freshly rewired null graph in every split
+  differs from the Reactome BINN by
+  `r dif("PAM50 subtype", "accuracy", "BINN, rewired graph")` (accuracy),
+  `r dif("Overall survival", "c_index", "BINN, rewired graph")` (C-index) and
+  `r dif("Gleason grade", "auroc", "BINN, rewired graph")` (AUROC); a fully
+  random graph of the same density by
+  `r dif("PAM50 subtype", "accuracy", "BINN, random graph")`,
+  `r dif("Overall survival", "c_index", "BINN, random graph")` and
+  `r dif("Gleason grade", "auroc", "BINN, random graph")`; and removing half
+  of the annotations by
+  `r dif("PAM50 subtype", "accuracy", "BINN, 50% of annotations removed")`,
+  `r dif("Overall survival", "c_index", "BINN, 50% of annotations removed")` and
+  `r dif("Gleason grade", "auroc", "BINN, 50% of annotations removed")`.
+  The data give no evidence that the model uses the *specific* pathway
+  knowledge. This echoes "sparsity is all you need", with one caveat: a null
+  control is informative only if the model could exploit correct knowledge in
+  the first place, which is not guaranteed (see `?bn_rewire`).
+* **Omics add little to survival here.** Age and stage alone
+  (C-index `r est("Overall survival", "c_index", "Cox, clinical only")`) are as
+  good as any omics model.
+* **Relaxing the architecture does not help by default.** The GNN preset is
+  not better at n < 1,000, and it is slower. Its appeal is flexibility, and the
+  ability to test hypotheses like the ones above, not accuracy out of the box.
+
+These results come from two small datasets and a small tuning grid, and
+should be read as a demonstration of the workflow, not as a definitive
+comparison. The benchmark script can be adapted to other `curatedTCGAData`
+cohorts or knowledge graphs.
+
+```{r info, eval = have}
+str(info)
+```

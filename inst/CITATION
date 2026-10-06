@@ -1,0 +1,10 @@
+bibentry(
+  bibtype = "InProceedings",
+  title = "Open Tools for More Accessible and Transparent Biologically Informed Deep Learning",
+  author = c(person("David", "Selby"), person("Daria", "Pavliuk"),
+             person("Gerrit", "Grossmann"), person("Sebastian", "Vollmer")),
+  booktitle = "2nd International Conference on AI for Science (AI4Sci 2026)",
+  address = "Mainz, Germany",
+  year = "2026",
+  note = "R package binnr, https://github.com/datasciapps/binnr"
+)

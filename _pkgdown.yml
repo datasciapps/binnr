@@ -1,0 +1,38 @@
+url: https://datasciapps.github.io/binnr/
+destination: pkgdown
+template:
+  bootstrap: 5
+reference:
+  - title: Knowledge graphs
+    contents:
+      - bn_graph
+      - pathway_graph
+      - reactome_graph
+      - bn_prune
+      - bn_rewire
+      - bn_drop_edges
+      - bn_pad
+  - title: Models
+    contents:
+      - bn_fit
+      - bn_arch
+      - bn_control
+      - bn_tune
+      - predict.bn_model
+      - tidy.bn_model
+      - autoplot.bn_model
+  - title: Interpretation
+    contents:
+      - node_importance
+      - node_activations
+      - bn_importance_stability
+  - title: Data
+    contents:
+      - brca
+      - prad
+      - reactome_tcga
+      - mae_to_omics
+  - title: internal
+    contents:
+      - reexports
+      - binnr-package

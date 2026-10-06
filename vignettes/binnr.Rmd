@@ -1,0 +1,463 @@
+---
+title: "Getting started with binnr"
+author:
+  - name: David Selby
+    affiliation: Deutsches Forschungszentrum für Künstliche Intelligenz (DFKI)
+    email: david_antony.selby@dfki.de
+  - name: Daria Pavliuk
+    affiliation: DFKI
+  - name: Gerrit Grossmann
+    affiliation: DFKI
+  - name: Sebastian Vollmer
+    affiliation: DFKI
+date: "`r Sys.Date()`"
+output:
+  BiocStyle::html_document:
+    toc_float: true
+vignette: >
+  %\VignetteIndexEntry{Getting started with binnr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4,
+  dpi = 96
+)
+run <- torch::torch_is_installed()
+knitr::opts_chunk$set(eval = run)
+```
+
+# Introduction
+
+*Biologically informed neural networks* (BINNs) are neural networks whose
+wiring follows prior biological knowledge. In the most common design, omics features are
+connected to the genes they measure, genes to the pathways they belong to, and
+pathways to their parent pathways, e.g. in [Reactome](https://reactome.org). The
+aim is a model that predicts well from high-dimensional omics data while its
+hidden nodes remain interpretable as biological processes.
+
+Existing BINN software is written in Python and implements the network as a
+stack of *masked* dense layers. That hard-codes several assumptions:
+
+* the hierarchy has a fixed number of layers, so shallow branches must be padded
+  with "dummy" copy nodes;
+* each pathway is represented by a single number;
+* each edge has its own weight;
+* other data (clinical variables, several omics layers) must be bolted on.
+
+**binnr** instead treats the knowledge graph as *data* and fits a
+message-passing graph neural network on it. The classic BINN is a special case,
+the default in fact, and each of the assumptions above becomes an argument you
+can change. Nothing is specific to Reactome, or to biology: any directed
+acyclic graph from features to higher-level concepts can be supplied as an
+edge list. The package works with standard R and Bioconductor objects (matrices, data
+frames, `survival::Surv`, `MultiAssayExperiment`) and returns tidy output.
+
+```{r load}
+library(binnr)
+library(survival)
+```
+
+# Example data
+
+The examples use a multi-omics subset of TCGA breast cancer built by
+`tcga_cohort("BRCA")` from `r BiocStyle::Biocpkg("curatedTCGAData")`. The
+first call downloads the assays through ExperimentHub and caches a compact
+processed copy (in `tcga_cache_dir()`), so the data are not shipped with the
+package; later calls read the cache. The cohort has 960 primary tumours and
+1,000 Reactome genes measured in three layers: RNA-seq expression, copy number
+and somatic mutations. The clinical table includes age, stage, the PAM50
+molecular subtype and overall survival.
+
+```{r data-check, include = FALSE}
+# The remaining chunks need the cached cohort (no download during R CMD check)
+has_data <- tcga_cached("BRCA") && tcga_cached("PRAD")
+knitr::opts_chunk$set(eval = run && has_data)
+```
+
+```{r data}
+brca <- tcga_cohort("BRCA")
+str(brca$omics, max.level = 1)
+brca$clinical
+```
+
+# The knowledge graph
+
+`pathway_graph()` builds a graph from any gene sets and an optional hierarchy.
+Here we use the bundled Reactome snapshot. For the full, current release use
+`reactome_graph()`; for MSigDB collections, pass the output of
+`msigdbr::msigdbr()` directly.
+
+```{r graph}
+g <- pathway_graph(
+  reactome_tcga$gene_sets,
+  reactome_tcga$hierarchy,
+  labels = reactome_tcga$pathways
+)
+g
+summary(g)
+```
+
+A graph is just two tibbles, so it can be inspected and filtered with the usual
+tools:
+
+```{r graph-tables}
+bn_nodes(g)
+bn_edges(g)
+```
+
+## The cost of strata
+
+Reactome is a *ragged* hierarchy: `r summary(g)$skip_edges` of its edges skip one
+or more levels, and the root pathways sit at different depths. A feedforward
+BINN updates the network one *stratum* (layer) at a time, so it must pad every
+such path with copy nodes until the graph is strictly stratified. `bn_pad()`
+performs that transformation, so its cost is easy to see:
+
+```{r pad}
+padded <- bn_pad(g)
+rbind(original = summary(g), padded = summary(padded))
+```
+
+Padding adds `r summary(padded)$n_dummy` artificial nodes with no biological
+meaning. binnr never needs them: its *topological* schedule updates each node
+once, after its children, so a gene linked directly to a high-level pathway
+simply sends its message there. (You can still fit the padded graph to
+reproduce a stratified BINN exactly; the benchmark vignette does.)
+
+# Classification: PAM50 subtypes
+
+The formula interface takes the outcome on the left-hand side and clinical
+covariates on the right (`~ 1` for none). `data` holds those variables, and
+`omics` is a named list of matrices whose rows correspond to the rows of `data`.
+Samples with missing values are dropped with a message, as in `lm()`.
+
+```{r split}
+set.seed(42)
+test <- sample(nrow(brca$clinical), 300)
+train <- setdiff(seq_len(nrow(brca$clinical)), test)
+rows <- function(i) lapply(brca$omics, function(m) m[i, ])
+```
+
+```{r pam50-fit}
+fit <- bn_fit(
+  pam50 ~ 1,
+  data = brca$clinical[train, ],
+  omics = rows(train),
+  graph = g,
+  control = bn_control(seed = 1)
+)
+fit
+```
+
+With several omics layers, each feature becomes an input node (`TP53|rna`,
+`TP53|cnv`, `TP53|mut`) feeding a gene node, as in P-NET. The default
+architecture is a classic BINN:
+
+```{r arch}
+bn_arch()
+```
+
+`predict()` returns a tibble using the tidymodels naming conventions:
+
+```{r pam50-predict}
+test_ok <- test[!is.na(brca$clinical$pam50[test])]
+pred <- predict(fit, rows(test_ok))
+table(predicted = pred$.pred_class, observed = brca$clinical$pam50[test_ok])
+mean(pred$.pred_class == brca$clinical$pam50[test_ok])
+head(predict(fit, rows(test_ok), type = "prob"))
+```
+
+Training stops early when the loss on a held-out validation fraction (20% by
+default) stops improving, and the best weights are restored:
+
+```{r history, fig.height = 3.5}
+ggplot2::autoplot(fit)
+```
+
+## Which pathways matter?
+
+`node_importance()` scores every node (input features, genes and pathways) by
+the mean absolute gradient × activation, a first-order attribution related to
+the DeepLIFT and SHAP scores used by P-NET and BINN:
+
+```{r importance}
+imp <- node_importance(fit, rows(test_ok))
+imp[imp$type == "pathway", c("label", "level", "importance")]
+```
+
+```{r importance-plot, fig.height = 4.5}
+ggplot2::autoplot(imp, n = 12)
+```
+
+The top genes and features can be found the same way:
+
+```{r importance-genes}
+head(imp[imp$type == "input", c("node", "modality", "importance")], 10)
+```
+
+As the paper discusses, such explanations can vary between equally accurate
+fits (the Rashomon effect). `bn_importance_stability()` refits the model with
+several seeds and summarises how stable each pathway's rank is. Check this
+before interpreting any single pathway.
+
+## Pathway activity scores for downstream statistics
+
+With scalar pathway nodes, each pathway has one activation per patient, which
+can be read as a learned "pathway activity score". `node_activations()`
+returns these as an ordinary samples × nodes matrix, so the usual tools for
+wrangling, testing and plotting apply. For example, which pathways'
+activities differ most between subtypes in the held-out patients?
+
+```{r activations}
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr)
+act <- node_activations(fit, rows(test_ok), type = "pathway")
+labels <- attr(act, "labels")
+subtype <- brca$clinical$pam50[test_ok]
+
+kw <- tibble(node = colnames(act), label = labels[colnames(act)]) |>
+  mutate(
+    p = apply(act, 2, function(a) {
+      if (stats::sd(a) < 1e-8) NA_real_ else kruskal.test(a, subtype)$p.value
+    })
+  ) |>
+  mutate(p_adj = p.adjust(p, method = "BH")) |>
+  arrange(p)
+kw
+```
+
+```{r activation-plot, fig.height = 4.5}
+top <- head(kw$node, 4)
+as_tibble(act[, top], rownames = "patient") |>
+  mutate(subtype = subtype) |>
+  pivot_longer(
+    -c(patient, subtype),
+    names_to = "node",
+    values_to = "activity"
+  ) |>
+  mutate(pathway = labels[node]) |>
+  ggplot2::ggplot(ggplot2::aes(subtype, activity, fill = subtype)) +
+  ggplot2::geom_boxplot(outlier.size = 0.5, show.legend = FALSE) +
+  ggplot2::facet_wrap(~pathway, labeller = ggplot2::label_wrap_gen(40)) +
+  ggplot2::labs(x = NULL, y = "Pathway activation") +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1))
+```
+
+Activations are only defined up to sign and scale, and, like importance scores,
+they should be checked for stability across seeds before being interpreted
+biologically.
+
+# Survival with clinical covariates
+
+A `Surv()` outcome gives a Cox proportional hazards model, trained by
+maximising the partial likelihood. Clinical covariates on the right-hand side
+enter at the prediction head alongside the pathway embeddings (late fusion):
+
+```{r surv-fit}
+fit_os <- bn_fit(
+  Surv(os_time, os_event) ~ age + stage,
+  data = brca$clinical[train, ],
+  omics = rows(train),
+  graph = g,
+  control = bn_control(seed = 1)
+)
+fit_os
+```
+
+```{r surv-eval}
+te <- brca$clinical[test, ]
+ok <- complete.cases(te[c("age", "stage", "os_time")])
+lp <- predict(fit_os, rows(test[ok]), covariates = te[ok, ])
+concordance(
+  Surv(os_time, os_event) ~ lp$.pred_linear_pred,
+  data = te[ok, ],
+  reverse = TRUE
+)$concordance
+```
+
+Survival curves come from the Breslow estimate of the baseline hazard:
+
+```{r surv-curves}
+s <- predict(
+  fit_os,
+  rows(test[ok][1:3]),
+  covariates = te[ok, ][1:3, ],
+  type = "survival",
+  eval_time = c(1, 3, 5) * 365
+)
+s$.pred[[1]]
+```
+
+# Regression
+
+A numeric outcome gives regression. For example, how well can copy number
+and mutations predict expression of the proliferation marker *TOP2A*?
+
+```{r regression}
+y <- brca$omics$rna[, "TOP2A"]
+fit_reg <- bn_fit(
+  rows(train)[c("cnv", "mut")],
+  y[train],
+  graph = g,
+  control = bn_control(seed = 1)
+)
+cor(predict(fit_reg, rows(test)[c("cnv", "mut")])$.pred, y[test])
+```
+
+# A second cohort: prostate cancer grade
+
+The same knowledge graph serves any cohort; `bn_fit()` prunes it to the genes
+that are observed. `tcga_cohort("PRAD")` holds RNA and copy number for 491 prostate tumours
+with Gleason grade, the task used to showcase P-NET. A binary factor gives a
+two-class model, and `type = "prob"` returns the class probabilities needed for
+an ROC curve:
+
+```{r prad}
+prad <- tcga_cohort("PRAD")
+set.seed(7)
+test_p <- sample(nrow(prad$clinical), 150)
+train_p <- setdiff(seq_len(nrow(prad$clinical)), test_p)
+fit_prad <- bn_fit(
+  grade ~ 1,
+  data = prad$clinical[train_p, ],
+  omics = lapply(prad$omics, function(m) m[train_p, ]),
+  graph = g,
+  control = bn_control(seed = 1)
+)
+fit_prad
+p_high <- predict(
+  fit_prad,
+  lapply(prad$omics, function(m) m[test_p, ]),
+  type = "prob"
+)$.pred_high
+truth <- prad$clinical$grade[test_p] == "high"
+# AUROC via the Mann-Whitney statistic (or use pROC / yardstick)
+(sum(rank(p_high)[truth]) - sum(truth) * (sum(truth) + 1) / 2) /
+  (sum(truth) * sum(!truth))
+```
+
+# Beyond BINNs: relaxing the architecture
+
+Each constraint of a feedforward BINN is a single argument of `bn_arch()`:
+
+| BINN assumption | `bn_arch()` argument | relaxation |
+|---|---|---|
+| one scalar per pathway | `hidden_dim = 1` | vector embeddings, e.g. `hidden_dim = 4` |
+| a unique weight per edge | `weights = "edge"` | `"shared"`: mean aggregation + per-level transform (GCN) |
+| predict from top pathways | `readout = "roots"` | `"pathways"`: pool all pathway nodes |
+| stratified schedule, dummy nodes | (not needed) | topological schedule follows the DAG |
+| single fusion point | `gene_layer` | gene nodes merge omics layers first |
+
+The `"gnn"` preset combines 4-dimensional embeddings with shared weights:
+
+```{r gnn}
+fit_gnn <- bn_fit(
+  Surv(os_time, os_event) ~ age + stage,
+  data = brca$clinical[train, ],
+  omics = rows(train),
+  graph = g,
+  arch = bn_arch("gnn"),
+  control = bn_control(seed = 1)
+)
+glance(fit_gnn)
+```
+
+## Is it the biology or just the sparsity?
+
+To test whether a model benefits from the *specific* prior knowledge, or merely
+from being sparse, fit it on a null graph with the same degree sequence
+(`bn_rewire()`) and compare. The benchmark vignette does this systematically
+with cross-validation.
+
+```{r null}
+g_null <- bn_rewire(g, method = "degree", seed = 1)
+fit_null <- bn_fit(
+  Surv(os_time, os_event) ~ age + stage,
+  data = brca$clinical[train, ],
+  omics = rows(train),
+  graph = g_null,
+  control = bn_control(seed = 1)
+)
+lp_null <- predict(fit_null, rows(test[ok]), covariates = te[ok, ])
+concordance(
+  Surv(os_time, os_event) ~ lp_null$.pred_linear_pred,
+  data = te[ok, ],
+  reverse = TRUE
+)$concordance
+```
+
+## Incomplete knowledge graphs
+
+Pathway databases are incomplete. Because the graph is data, the effect of
+missing annotations can be simulated directly: `bn_drop_edges()` removes a
+random share of gene-pathway annotations, and the model is refitted.
+
+```{r incomplete}
+g_half <- bn_drop_edges(g, prop = 0.5, seed = 1)
+summary(g_half)
+fit_half <- bn_fit(
+  pam50 ~ 1,
+  data = brca$clinical[train, ],
+  omics = rows(train),
+  graph = g_half,
+  control = bn_control(seed = 1)
+)
+mean(
+  predict(fit_half, rows(test_ok))$.pred_class == brca$clinical$pam50[test_ok]
+)
+```
+
+Genes that lose all their annotations drop out of the model entirely, so an
+incomplete graph also changes which features are used.
+
+# Working with Bioconductor objects
+
+If your data are in a `MultiAssayExperiment`, pass it as `data`. The omics
+layers and clinical variables (`colData`) are extracted and matched by patient
+automatically. Assays must be matrix-like with gene symbols as row names
+(use `mae_to_omics()` to see exactly what will be used).
+
+```{r mae, eval = run && has_data && requireNamespace("MultiAssayExperiment", quietly = TRUE)}
+suppressPackageStartupMessages(library(MultiAssayExperiment))
+cd <- as.data.frame(brca$clinical)
+rownames(cd) <- cd$patient
+mae <- MultiAssayExperiment(
+  experiments = list(rna = t(brca$omics$rna), cnv = t(brca$omics$cnv)),
+  colData = S4Vectors::DataFrame(cd)
+)
+mae
+fit_mae <- bn_fit(
+  pam50 ~ age,
+  data = mae,
+  graph = g,
+  control = bn_control(epochs = 20, seed = 1)
+)
+fit_mae
+```
+
+For TCGA data, `curatedTCGAData::curatedTCGAData()` returns such objects
+directly. See `data-raw/tcga.R` in the package sources for how `brca` was
+built.
+
+# Current limitations
+
+This is an alpha release. Not yet supported:
+
+* missing values or missing omics layers (drop or impute them first);
+* pathway expansion or learning new edges;
+* mid-level fusion of clinical data.
+
+The graph formulation makes all of these natural extensions.
+
+# Session information {.unnumbered}
+
+```{r session, eval = TRUE}
+sessionInfo()
+```

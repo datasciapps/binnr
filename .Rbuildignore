@@ -1,0 +1,15 @@
+^LICENSE\.md$
+^data-raw$
+^\.github$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$
+^README\.Rmd$
+^.*\.Rproj$
+^\.Rproj\.user$
+^abstract$
+^talk$
+^cluster/logs$
+^cluster$
+^Rplots\.pdf$
+^inst/scripts/replication$

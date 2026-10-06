@@ -1,0 +1,36 @@
+/*-- scss:defaults --*/
+$font-family-sans-serif: "Source Sans Pro", Helvetica, Arial, "DejaVu Sans", sans-serif;
+$presentation-heading-font: $font-family-sans-serif;
+$font-family-monospace: Consolas, Menlo, "DejaVu Sans Mono", monospace;
+$presentation-heading-color: #1c3d6e;
+$link-color: #2a78d6;
+$presentation-font-size-root: 30px;
+$code-block-font-size: 0.62em;
+
+/*-- scss:rules --*/
+.reveal .slide-logo { max-height: 3em; }
+.cite { font-size: 0.7em; color: #666; }
+.small-note { font-size: 0.7em; color: #555; margin-top: 0.6em; }
+.reveal .smaller table { font-size: 0.72em; }
+.reveal table th, .reveal table td { padding: 0.15em 0.6em; }
+.reveal .highlight { background: #e8f0fb; padding: 0.4em 0.8em; border-left: 6px solid #2a78d6; }
+.reveal pre code { max-height: 100%; }
+
+.reveal .defn { background: #f2f6fc; border-left: 6px solid #2a78d6; padding: 0.35em 0.7em; margin: 0.4em 0; }
+.reveal .bignum { font-size: 4.2em; font-weight: 700; color: #2a78d6; line-height: 1; }
+.reveal .claimbox { text-align: center; border: 2px solid #d5dfee; border-radius: 10px; padding: 0.6em 0.4em; font-size: 1.05em; }
+.reveal .hook { text-align: center; font-size: 1.35em; color: #1c3d6e; margin-top: 0.8em; }
+.reveal .keywords { text-align: center; color: #1c3d6e; font-size: 0.85em; margin-top: 0.4em; }
+.reveal table.scrutiny, .reveal .scrutiny table { font-size: 0.8em; }
+.reveal .bigcode pre code { font-size: 1.35em; line-height: 1.35; }
+.reveal table td, .reveal table th { vertical-align: top; }
+
+.reveal .tp53 { font-size: 1.15em; margin-top: 1.2em; }
+.reveal .tp53 table { width: 100%; }
+.reveal .tp53 td { padding: 0.3em 0.6em; }
+.reveal .tp53 td:last-child { font-size: 1.5em; color: #eb6834; }
+
+.reveal .who { margin-top: 0.4em; }
+.reveal .who p { margin: 0 0 0.35em 0; }
+.reveal .who img { margin: 0.5em 0 0 0; }
+.reveal .who .cite { display: block; line-height: 1.3; }
